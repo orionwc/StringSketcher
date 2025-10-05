@@ -10,6 +10,8 @@ To implement this hack yourself, you'll need to follow these two steps:
 2. Update the code for the Arduino by pasting in coordinates in the output format supported by Part (1)
 
 ## Part 1 - Generate Coordinates
+*Note: If you just want to try out the included demo patterns, jump ahead to Part 2.*
+
 The website is available at: https://orionwc.github.io/Image2Sand/
 
 ### Steps:
@@ -21,8 +23,9 @@ The website is available at: https://orionwc.github.io/Image2Sand/
 
 ## Part 2 - Arduino Implementation
  Adds a pattern to the Arduino code that traces a sequence of points specified as an array of polar coordinates in the units: r=radial, scaled from 0-1000, and theta=angle in tengths of a degree
-* You can find the code in StringSketcher.ino. You can either copy and paste in the full code into the HackPack IDE (on Level 3), or you can see the specific changes to make and include them individually.
+* You can find the code in StringSketcher.ino. You can either copy and paste in the full code into the HackPack IDE (on Level 3) over the StockCode, or you can see the specific changes to make and include them individually.
 * To draw your own image, paste in the coordinates you copied from the website (Part 1) into one of the Patterns 1-6 at the top of the code. Be sure to comment out any other patterns there by default by inserting // in front of any other coordinates so only one set of coordinates is used for each pattern. If this is your first time trying a custom pattern, I recommend pasting new patterns into Pattern 6, replacing the large pattern in there by default. Start with patterns of fewer than 200 points, but you can explore the limitations.
+* Compile the code and deploy to the Arduino.
 
 ## Running the Pattern
  Once you've updated the code, the pattern will be ready to draw. **Important**: you have to select the special pattern pen mode by pressing the green button when the pen selector LED is highlighted - you need the mode indicated by the Cyan color. You can make this the default by setting PenStyle to 4 in config.h. Now use the red button to scroll through the pattern numbers and the green button to select one. Once the pattern has finished drawing, the LEDs will flash red and the robot will stop moving. Pressing the red button will return the robot to the initialization position, ready for the next pattern. It's advisable to check that the robot returned accurately to the initialization position and adjust the strings manually if needed before starting another pattern.
