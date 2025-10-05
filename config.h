@@ -2,7 +2,7 @@
 uint8_t bootSize = 0;      // [0 - 2] 0 - small, 1 - medium, 2 - large
 uint8_t initCursorPos = 6; // [0 - 7] Boot onto image selction
 
-uint8_t penStyle = 3;     // [0 - 3] Default pen style: dist, time, dotted, chance
+uint8_t penStyle = 4;     // [0 - 3] Default pen style: dist, time, dotted, chance
 
 float manualXOffset = 0;  // [0 - 100] Manual image placement adjustment. 
 float manualYOffset = 0;  // [0 - 100] Positive Y moves image down. Units in mm
@@ -28,9 +28,9 @@ uint8_t penHold = 35;          // [0 - 100] how long pendown persits after a dot
 //Motor Variables---------------------------------------------
 uint8_t sampleTime = 5;         // [5 - 200] how often (ms) encoders are updated
 
-uint8_t drawSpeed = 190;        // [0 - 255]
-uint8_t motorTravelSpeed = 255; // [0 - 255]
-uint8_t motorCoastDist = 3;     // [0 - 5] within dist mm we reduce motor speed
+uint8_t drawSpeed = 150;        // [0 - 255]
+uint8_t motorTravelSpeed = 190  // [0 - 255]
+uint8_t motorCoastDist = 8;     // [0 - 5] within dist mm we reduce motor speed
 float epsilonScaling = 0.4;     // [0.1 - 0.9] scale motor speed near target
 
 bool flipRightMotor = false;  
