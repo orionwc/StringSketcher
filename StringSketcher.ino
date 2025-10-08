@@ -65,8 +65,6 @@ Updated 10/06/2025
 #include <AS5600.h>             // encoder
 #include <Adafruit_Sensor.h>    // I2C Multiplexer
 #include <Servo.h>
-#include <SPI.h>                // SD
-#include <SdFat.h>              // FAT storage type
 #include <Adafruit_NeoPixel.h>
 #include <ezButton.h>
 
@@ -80,7 +78,8 @@ Updated 10/06/2025
 #define L_M_PWM 3
 #define R_M_DIR 4
 #define R_M_PWM 5
-#define FILE_NUM 6
+
+#define NUM_PATTERNS 6          // Number of patterns selectable in one Pattern Mode
 
 // Image Size presets ---------------------------------------------------------
 #define SMALL_WIDTH 500
@@ -96,7 +95,7 @@ Updated 10/06/2025
 #define LARGE_Y_OFFSET 425
 
 /* PATTERNS
-1 - Diamond Test Pattern
+1 - Test Pattern
 2 - Squirrel
 3 - Rose
 4 - Planet
@@ -106,27 +105,57 @@ Updated 10/06/2025
 
 // ************* SETTINGS *************
 
-// Pattern completion behavior ------------------------------------------------
-const bool MoveDownOnCompletion = true;  // [true/false] Move down after pattern completes
+// Set this to true or false to enable or disable SD card functionality
+// Note that several images can be included in the .ino file directly as patterns if this is disabled
+// If you include multiple patterns and enable this, it's likely the sketch will exceed the Arduino memory limit
+#define EnableSDCard true        // [true/false] Enable SD card functionality (disable to  large embedded patterns)
 
-// Pen mode variable
-uint8_t penMode = 0;  // [0 - 3] Pen mode: 0=White(PROGMEM), 1=Red(SD 1-6), 2=Green(SD 7-12), 3=Blue(SD 13-18), 4=Yellow(Serial) reserved
+#if EnableSDCard
+#include <SPI.h>                // SD
+#include <SdFat.h>              // FAT storage type
+#endif
+
+// Pattern completion behavior ------------------------------------------------
+const bool MoveDownOnCompletion = true;  // [true/false] Move below image after pattern completes
+
+// Starting Pattern Mode
+uint8_t patternMode = 0;  // Current pattern mode selection (0=EMBEDDED, 1-3=SDCARD_1-3, 4=STREAMING)
+
+// RGB colors for each pattern mode (R, G, B)
+const uint8_t patternModeColors[][3] = {
+  {255, 255, 255},  // EMBEDDED - White
+  {255, 0, 0},      // SDCARD_1 - Red
+  {0, 255, 0},      // SDCARD_2 - Green
+  {0, 0, 255},      // SDCARD_3 - Blue
+  {255, 255, 0}     // STREAMING - Yellow
+};
+
+// Which pattern modes are enabled based on SD card setting
+const bool patternModeEnabled[] = {
+  true,             // EMBEDDED - always enabled
+#if EnableSDCard    // SDCARD_1, SDCARD_2, SDCARD_3 - enabled when SD card available
+  true, true, true,            
+#else
+  false, false, false,         
+#endif
+  false            // STREAMING - reserved for future
+};
 
 // ************* END SETTINGS *************
+
+// Pattern mode enumeration
+enum PatternMode {
+  EMBEDDED = 0,    // PROGMEM patterns
+  SDCARD_1 = 1,    // SD files 1-6
+  SDCARD_2 = 2,    // SD files 7-12
+  SDCARD_3 = 3,    // SD files 13-18
+  STREAMING = 4    // Serial receiving mode (future)
+};
 
 //Pattern drawing structures-----------------------------------
 struct Positions {
   uint16_t radial;                  // radial distance (0-1000)
   uint16_t angular;                 // angular position (degrees * 10)
-};
-
-// Pen mode enumeration
-enum PenMode {
-  WHITE_MODE = 0,    // Default - read from PROGMEM patterns
-  RED_MODE = 1,      // SD offset 0 (files 1-6)
-  GREEN_MODE = 2,    // SD offset 6 (files 7-12) 
-  BLUE_MODE = 3,     // SD offset 12 (files 13-18)
-  YELLOW_MODE = 4    // Serial receiving mode (future)
 };
 
 // Pattern definitions (polar coordinates: radial, angular*10)--------
@@ -136,7 +165,6 @@ const Positions pattern1[] PROGMEM = { // TEST PATTERN
   {800, 1800}, // Point 3: Left   (180°)
   {800, 2700}, // Point 4: Down   (270°)
   {800, 0}    // Point 5: Return to start (0°)
-
 };
 
 const Positions pattern2[] PROGMEM = {
@@ -144,39 +172,42 @@ const Positions pattern2[] PROGMEM = {
   {708,2836},{709,2885},{700,2894},{679,2899},{642,2882},{626,2858},{608,2793},{602,2792},{594,2841},{584,2878},{555,2932},{566,3009},{653,3026},{712,3043},{752,3039},{770,3043},{779,3049},{833,3052},{847,3058},{939,3132},{944,3142},{938,3151},{927,3156},{884,3158},{856,3149},{818,3126},{786,3126},{700,3163},{659,3202},{648,3228},{660,3287},{681,3400},{738,3426},{782,3450},{854,3500},{867,3513},{873,3534},{862,3557},{821,3593},{795,12},{736,50},{617,107},{598,154},{568,198},{536,234},{512,246},{492,238},{474,200},{432,115},{299,3596},{251,3586},{177,26},{87,53},{24,2284},{101,2137},{182,2174},{254,2221},{332,2274},{405,2324},{410,2320},{358,2214},{281,1953},{265,1682},{333,1306},{411,1208},{511,1164},{601,1160},{691,1179},{748,1201},{807,1233},{860,1268},{916,1314},{957,1359},{981,1392},{998,1438},{1000,1466},{986,1511},{964,1541},{920,1581},{884,1605},{836,1624},{795,1631},{723,1632},{683,1813},{677,1899},{674,1977},{673,2037},{672,2135},{670,2199},{666,2276},{663,2357},{659,2424},{651,2496},{635,2567},{669,2600},{681,2620},{689,2648},{708,2836}
 
   // Empty Pattern (use this if you want to try a complex Pattern6 below)
-  // {0,0}
+  //{0,0}
 };
 
 const Positions pattern3[] PROGMEM = {
+  // Rose (197 points)
+  {979,2715},{701,2720},{574,2784},{535,2844},{661,2982},{709,3055},{743,3135},{760,3231},{794,3433},{571,3442},{454,3400},{376,3311},{343,3040},{443,2863},{466,3121},{549,3244},{571,3249},{476,2934},{534,2730},{207,2769},{159,2631},{186,2577},{599,2659},{547,2421},{624,2207},{588,2231},{523,2349},{518,2564},{411,2422},{396,2302},{425,2179},{493,2088},{585,2039},{710,2021},{823,2026},{809,2229},{794,2321},{769,2382},{723,2452},{678,2504},{613,2560},{702,2658},{909,2675},{979,2715},{979,2715},{239,2997},{288,3231},{357,3428},{312,3362},{265,3316},{215,3315},{121,2749},{202,2873},{239,2997},{239,2997},{131,2497},{241,2036},{309,2040},{403,1956},{337,2102},{253,2342},{221,2428},{131,2497},{131,2497},{92,2244},{80,1357},{167,905},{234,1019},{406,1308},{521,1353},{654,1356},{810,1324},{858,1401},{879,1466},{874,1478},{683,1529},{533,1673},{432,1777},{274,1923},{92,2244},{92,2244},{458,1245},{469,1103},{569,768},{670,699},{812,761},{839,780},{861,821},{853,889},{799,941},{797,895},{761,853},{777,825},{713,861},{680,958},{664,944},{656,847},{718,762},{653,793},{615,849},{613,931},{646,987},{724,1039},{826,1060},{667,1145},{508,1238},{572,1234},{651,1198},{743,1143},{837,1078},{976,1192},{907,1245},{820,1285},{705,1309},{583,1302},{458,1245},{458,1245},{704,978},{754,874},{771,912},{768,951},{744,971},{744,971},{735,1000},{776,1021},{854,1030},{897,1024},{927,996},{979,916},{970,889},{901,800},{897,875},{876,920},{815,973},{735,1000},{735,1000},{673,951},{714,859},{796,816},{762,850},{797,895},{795,935},{850,895},{861,821},{812,761},{776,750},{747,756},{677,807},{650,901},{673,951},{673,951},{727,1003},{831,962},{876,918},{897,875},{892,803},{857,753},{814,725},{715,690},{835,678},{841,669},{783,649},{720,646},{590,689},{466,830},{421,1203},{288,997},{204,822},{329,639},{614,445},{714,443},{828,465},{909,495},{973,529},{872,585},{797,554},{689,530},{607,527},{519,555},{704,568},{810,590},{916,639},{1000,711},{902,798},{964,880},{979,916},{953,968},{899,1023},{811,1028},{727,1003},{727,1003},{235,606},{152,703},{80,805},{64,2553},{220,3422},{309,3524},{397,8},{512,126},{684,278},{828,309},{808,355},{759,413},{671,392},{546,392},{235,606}
 
   // Empty Pattern (use this if you want to try a complex Pattern6 below)
-  {0,0}
+  //{0,0}
 };
 
 const Positions pattern4[] PROGMEM = {
   // Planet (104 points)
-  {468,2691},{469,2778},{469,2845},{469,2950},{470,3083},{470,3224},{470,3369},{470,3465},{468,3500},{284,3033},{357,2544},{457,2387},{468,2390},{468,2487},{468,2560},{468,2691},{468,2691},{251,2933},{359,3416},{560,15},{727,98},{796,126},{928,180},{980,210},{1000,238},{989,264},{960,285},{916,307},{844,337},{705,393},{506,504},{498,496},{503,378},{549,355},{613,318},{658,286},{682,259},{688,234},{678,215},{648,188},{619,170},{541,125},{450,68},{344,3576},{249,3426},{175,3059},{201,2619},{324,2330},{424,2233},{516,2172},{620,2110},{664,2077},{682,2046},{683,2032},{674,2013},{649,1991},{610,1965},{497,1899},{498,1845},{497,1775},{504,1776},{707,1889},{796,1926},{886,1963},{962,2000},{988,2021},{996,2044},{991,2056},{974,2073},{914,2105},{833,2139},{752,2171},{653,2215},{480,2322},{340,2499},{251,2933},{251,2933},{156,2687},{223,3462},{330,18},{440,102},{468,122},{470,135},{472,235},{472,364},{472,480},{472,598},{471,688},{472,827},{471,969},{471,1039},{470,1131},{470,1255},{470,1384},{469,1470},{468,1563},{467,1682},{467,1735},{467,1861},{467,1914},{467,2033},{467,2142},{462,2163},{364,2230},{271,2330},{156,2687},{156,2687},{1200,2700}
-
+  {468,2691},{469,2778},{469,2845},{469,2950},{470,3083},{470,3224},{470,3369},{470,3465},{468,3500},{284,3033},{357,2544},{457,2387},{468,2390},{468,2487},{468,2560},{468,2691},{468,2691},{251,2933},{359,3416},{560,15},{727,98},{796,126},{928,180},{980,210},{1000,238},{989,264},{960,285},{916,307},{844,337},{705,393},{506,504},{498,496},{503,378},{549,355},{613,318},{658,286},{682,259},{688,234},{678,215},{648,188},{619,170},{541,125},{450,68},{344,3576},{249,3426},{175,3059},{201,2619},{324,2330},{424,2233},{516,2172},{620,2110},{664,2077},{682,2046},{683,2032},{674,2013},{649,1991},{610,1965},{497,1899},{498,1845},{497,1775},{504,1776},{707,1889},{796,1926},{886,1963},{962,2000},{988,2021},{996,2044},{991,2056},{974,2073},{914,2105},{833,2139},{752,2171},{653,2215},{480,2322},{340,2499},{251,2933},{251,2933},{156,2687},{223,3462},{330,18},{440,102},{468,122},{470,135},{472,235},{472,364},{472,480},{472,598},{471,688},{472,827},{471,969},{471,1039},{470,1131},{470,1255},{470,1384},{469,1470},{468,1563},{467,1682},{467,1735},{467,1861},{467,1914},{467,2033},{467,2142},{462,2163},{364,2230},{271,2330},{156,2687}
+  
   // Empty Pattern (use this if you want to try a complex Pattern6 below)
-  // {0,0}
+  //{0,0}
 };
 
-// Spiral
 const Positions pattern5[] PROGMEM = {
-  // Paste your own pattern here and comment out the empty pattern below by placing // in front of the {0,0}
-
+  // Insert your own pattern here (comment out the empty pattern if you do)
 
   // Empty Pattern (use this if you want to try a complex Pattern6 below)
   {0,0}
 };
 
-// Pentagon
 const Positions pattern6[] PROGMEM = {
-  // Large patterns require the other patterns 1-5 to be replaced with the empty pattern {0,0}.
-
-  // Empty Pattern (select this if you need to reserve the memory for the other patterns 1-5 above)
+#if EnableSDCard
+  // Empty Pattern - a large pattern is not supported when SD card is enabled as it exceeds the Arduino memory limit
   {0,0}
-
+#else
+  // Large embedded pattern - add your ~500 point pattern here when SD card is disabled
+  // Example large pattern (replace with your actual data)
+  // Elephant on a Skateboard
+  {240,2657},{270,2747},{274,2786},{269,2801},{149,2893},{156,2524},{172,2444},{204,2366},{207,2372},{214,2460},{240,2657},{240,2657},{303,2859},{362,2843},{396,2830},{415,2809},{451,2755},{465,2745},{488,2743},{492,2735},{780,2188},{801,2169},{815,2149},{852,2086},{865,2075},{882,2067},{899,2068},{909,2077},{910,2087},{898,2116},{871,2160},{854,2181},{838,2197},{822,2210},{776,2241},{769,2247},{761,2270},{764,2272},{800,2271},{824,2278},{848,2295},{857,2311},{858,2324},{865,2325},{980,2250},{982,2252},{765,2475},{762,2918},{980,3147},{977,3149},{865,3075},{858,3076},{856,3092},{848,3103},{827,3120},{812,3125},{791,3129},{776,3129},{763,3125},{757,3127},{765,3149},{819,3188},{838,3203},{865,3228},{877,3243},{906,3286},{920,3315},{921,3326},{915,3333},{908,3336},{900,3337},{880,3332},{869,3325},{851,3306},{821,3253},{810,3238},{785,3215},{564,2995},{542,2961},{536,2969},{538,2991},{534,3006},{511,3018},{441,3027},{397,3050},{349,3107},{335,3139},{326,3180},{327,3229},{340,3280},{403,3367},{432,3401},{450,3426},{482,3477},{523,3538},{527,3538},{529,3532},{514,3492},{491,3436},{472,3400},{437,3347},{410,3313},{373,3266},{377,3258},{438,3243},{468,3250},{574,3282},{624,3286},{649,3284},{678,3278},{696,3271},{740,3238},{753,3232},{773,3233},{780,3239},{790,3256},{799,3285},{817,3346},{820,3373},{809,3384},{773,3393},{691,3399},{622,3413},{587,3430},{574,3443},{570,3470},{635,2},{681,78},{685,77},{696,62},{705,34},{712,3561},{725,3539},{745,3522},{744,3496},{755,3476},{772,3465},{792,3456},{830,3446},{831,3449},{826,3451},{819,3461},{810,3488},{812,3497},{809,3509},{803,3517},{786,3528},{764,3534},{747,3548},{737,3567},{739,82},{740,173},{739,252},{736,288},{732,324},{720,380},{709,411},{694,441},{668,484},{614,595},{602,686},{607,739},{554,700},{509,681},{466,682},{439,694},{422,710},{403,735},{370,810},{345,874},{326,924},{282,1049},{235,1265},{235,1345},{244,1366},{274,1364},{290,1343},{293,1349},{248,1424},{214,1563},{208,1690},{226,1821},{190,1775},{174,1731},{160,1648},{155,1543},{175,1328},{188,1275},{189,1257},{183,1245},{139,1371},{121,1576},{130,1717},{146,1800},{168,1857},{261,1944},{307,1959},{357,1985},{383,2009},{411,2051},{439,2120},{455,2165},{472,2191},{537,2238},{565,2267},{563,2286},{550,2300},{520,2326},{452,2382},{419,2407},{410,2411},{393,2400},{381,2379},{369,2323},{351,2268},{335,2241},{313,2221},{262,2216},{220,2240},{185,2284},{135,2426},{116,2820},{115,2919},{112,3009},{105,3122},{90,3367},{146,412},{198,539},{203,528},{186,461},{145,256},{129,103},{120,3468},{238,3585},{312,19},{314,8},{252,3543},{150,3361},{137,3285},{136,3147},{150,3056},{176,2981},{303,2859},{303,2859},{762,3078},{767,3067},{785,3059},{800,3061},{807,3065},{815,3077},{814,3083},{806,3091},{791,3097},{773,3093},{764,3085},{764,3085},{703,2304},{688,2316},{694,3087},{722,3099},{725,3097},{719,3083},{720,3072},{726,3054},{736,3043},{761,3030},{795,3029},{816,3033},{818,3035},{822,3034},{826,3035},{765,2966},{760,2442},{828,2362},{825,2360},{811,2367},{788,2370},{773,2370},{760,2368},{739,2357},{730,2348},{721,2320},{725,2303},{733,2296},{730,2294},{730,2294},{764,2317},{770,2333},{786,2340},{804,2335},{814,2326},{815,2317},{811,2311},{798,2304},{789,2302},{773,2307},{773,2307},{626,1723},{580,1706},{531,1672},{501,1632},{473,1557},{475,1552},{531,1557},{552,1602},{589,1647},{627,1674},{670,1692},{709,1699},{751,1702},{792,1699},{826,1692},{832,1694},{831,1698},{815,1708},{790,1718},{731,1729},{671,1730},{626,1723},{626,1723},{645,1655},{599,1633},{572,1607},{542,1543},{482,1534},{473,1522},{466,1500},{461,1496},{456,1502},{455,1537},{452,1573},{439,1599},{429,1603},{418,1594},{407,1547},{394,1500},{342,1408},{316,1319},{347,1287},{398,1231},{431,1193},{463,1151},{459,1145},{375,1204},{325,1244},{285,1274},{270,1282},{267,1275},{301,1106},{352,953},{382,876},{413,802},{437,751},{451,734},{474,721},{497,719},{524,724},{551,737},{600,774},{650,821},{680,855},{693,875},{703,897},{707,913},{710,950},{708,981},{701,1047},{694,1104},{698,1109},{704,1105},{709,1071},{713,1070},{736,1176},{745,1217},{739,1243},{689,1353},{664,1426},{658,1465},{659,1498},{673,1533},{684,1546},{713,1560},{743,1564},{770,1557},{789,1546},{803,1529},{806,1519},{806,1500},{793,1442},{796,1412},{815,1382},{842,1364},{876,1354},{896,1353},{916,1355},{964,1369},{1000,1386},{999,1390},{992,1395},{965,1404},{956,1411},{951,1419},{939,1426},{930,1425},{925,1421},{918,1401},{910,1394},{892,1395},{879,1404},{874,1410},{871,1430},{890,1484},{898,1520},{896,1543},{890,1561},{863,1600},{837,1622},{813,1635},{789,1646},{741,1659},{686,1662},{645,1655},{645,1655},{569,1315},{583,1345},{583,1362},{593,1355},{600,1337},{596,1326},{586,1316},{572,1312}
+#endif
 };
 
 // Pattern sizes for easy access
@@ -204,14 +235,7 @@ Adafruit_NeoPixel pixels (10, LEDPIN, NEO_GRB + NEO_KHZ800);
 Servo myPen;               // pen Servo
 
 AS5600 encL;               //  left
-AS5600 encR;               //  right
-
-SdFat SD;  
-File thrFile;
-
-// File reading system variables
-bool fileMode = false;
-bool sdCardInitialized = false;     
+AS5600 encR;               //  right     
 #pragma endregion CLASS_OBJECTS
 
 //////////////////////////////////////////////////
@@ -305,6 +329,100 @@ bot Plotter = {{0}, {0}, {0}, {0}, {0}, 0, false, {0, 0}, false};
 #pragma endregion STRUCTS
 
 //////////////////////////////////////////////////
+//  SD CARD FUNCTIONALITY //
+//////////////////////////////////////////////////
+#if EnableSDCard
+SdFat SD;  
+File thrFile;
+
+// File reading system variables
+bool sdCardInitialized = false;
+
+// Initialize file system based on pattern mode
+bool initializeFileSystem() {
+  if (patternMode == EMBEDDED) {
+    return true;
+  } else {
+    // Initialize SD card only once when first needed for SD modes
+    if (!sdCardInitialized) {
+      if (!SD.begin(SD_CS_PIN)) {
+        Serial.println("SD Card initialization failed!");
+        // Show error light - flash red on LED 0
+        showErrorLED(0, 255, 0, 0, 500.0);
+        UI.selectMode = true;
+        return false;
+      } else {
+        sdCardInitialized = true;
+      }
+    }
+    
+    // Calculate file number with offset
+    uint8_t actualFileNumber = UI.cursorPos + 1 + (patternMode - 1) * 6;    
+    // Also try with character array
+    char filenameChar[10];
+    sprintf(filenameChar, "%d.thr", actualFileNumber);
+    
+    // Check if SD card is available
+    if (!SD.exists(filenameChar)) {
+      Serial.print("File does not exist: ");
+      Serial.println(filenameChar);
+      return false;
+    }
+    
+    thrFile = SD.open(filenameChar, FILE_READ);
+    
+    if (!thrFile) {
+      Serial.print("Failed to open: ");
+      Serial.println(filenameChar);
+      // Show error light - flash red on LED 1
+      showFileError();
+      // Return to selector screen
+      UI.selectMode = true;
+      return false; // Indicate failure
+    } else {
+      Serial.print("Opened file: ");
+      Serial.println(filenameChar);
+      return true; // Indicate success
+    }
+  }
+}
+
+// Read next coordinate from .thr file
+bool readNextThrCoordinate(Positions* coord) {
+  if (!thrFile || !thrFile.available()) {
+    return false; // End of file
+  }
+  
+  String line = thrFile.readStringUntil('\n');
+  line.trim(); // Remove whitespace
+  
+  Serial.print("Read line: ");
+  Serial.println(line);
+  
+  if (line.length() == 0) {
+    return false; // Empty line
+  }
+  
+  // Parse "theta radius" format
+  int spaceIndex = line.indexOf(' ');
+  if (spaceIndex > 0) {
+    float theta = line.substring(0, spaceIndex).toFloat();
+    float radius = line.substring(spaceIndex + 1).toFloat();
+    
+    // Convert to existing format
+    convertThetaRhoToRadialAngular(theta, radius, &coord->radial, &coord->angular);
+    
+    // Increment point index for file reading
+    Plotter.pointIndex++;
+    
+    return true;
+  }
+  
+  return false;
+}
+#endif
+
+//////////////////////////////////////////////////
 //  SETUP //
 //////////////////////////////////////////////////
 #pragma region SETUP_FUNCTIONS
@@ -333,11 +451,7 @@ void runUI(){
     if(redButton.isReleased() && UI.sWasPressed){
       UI.sWasPressed = false;
       UI.cursorPos += 1;               // cycle thru menu
-      UI.cursorPos %= FILE_NUM + 2;    // wrap back after the draw settings
-      Serial.print("Cursor pos: ");
-      Serial.println(UI.cursorPos);
-      Serial.print("Pen mode: ");
-      Serial.println(penStyle);
+      UI.cursorPos %= NUM_PATTERNS + 2;    // wrap back after the draw settings
     }
 
     // check for choose/pause (green) button press and release
@@ -347,7 +461,7 @@ void runUI(){
 
     if(greenButton.isReleased() && UI.pWasPressed){
       // if hit choose on size icon
-      if(UI.cursorPos == FILE_NUM){   // if size preset selection
+      if(UI.cursorPos == NUM_PATTERNS){   // if size preset selection
         pixels.clear();        
 
         Image.setSize += 1;           // change size
@@ -368,26 +482,29 @@ void runUI(){
         pixels.show();
       }
       
-      // if hit choose on pen icon
-      else if(UI.cursorPos == FILE_NUM + 1){     // pen mode selection
+      // if hit choose on pattern mode icon
+      else if(UI.cursorPos == NUM_PATTERNS + 1){     // pattern mode selection
         pixels.clear();        
 
-        penMode += 1;
-        penMode %= 4;  // 4 pen modes: White, Red, Green, Blue (Yellow reserved for future)
-        Serial.println("Pen mode changed to: " + String(penMode));
-        updatePenModeDisplay();
+        // Cycle through enabled pattern modes only
+        do {
+          patternMode = (patternMode + 1) % (sizeof(patternModeEnabled) / sizeof(patternModeEnabled[0]));  // Cycle through all available modes
+        } while (!patternModeEnabled[patternMode]);  // Keep cycling until we find an enabled mode
+        updatePatternModeDisplay();
       } 
       
       //otherwise, we've hit choose on a file number or pattern number
       else {
         UI.pWasPressed = false;     // ensure not paused
         
+#if EnableSDCard
         // Try to initialize file system for selected file
         if (!initializeFileSystem()) {
           // File initialization failed, stay in selector mode
           Serial.println("File not found, staying in selector");
           return; // Stay in UI loop
         }
+#endif
         
         UI.selectMode = false;      // Exit UI loop with this flag
 
@@ -405,13 +522,13 @@ void runUI(){
       }
     }
 
-    // Blink cursor LED with pen mode color if over file/pattern
+    // Blink cursor LED with pattern mode color if over file/pattern
     if(UI.cursorPos < 6){
       pixels.clear();
       
-      // Get pen mode color and apply brightness scaling
+      // Get pattern mode color and apply brightness scaling
       uint8_t r, g, b;
-      getPenModeColor(penMode, &r, &g, &b);
+      getPatternModeColor(patternMode, &r, &g, &b);
       setLEDWithSineWave(UI.cursorPos + 2, r, g, b, 300.0);
       pixels.show();
     } 
@@ -434,43 +551,30 @@ void runUI(){
         }
       pixels.show();
     } 
-    // change cursor LED's color to select pen mode
+    // change cursor LED's color to select pattern mode
     else {
       pixels.clear();
-      updatePenModeDisplay();
+      updatePatternModeDisplay();
     }
     
   }
 }
 
-// Get color for pen mode (RGB values 0-255)
-void getPenModeColor(uint8_t mode, uint8_t* r, uint8_t* g, uint8_t* b) {
-  switch(mode) {
-    case 0: // White - PROGMEM patterns
-      *r = 255; *g = 255; *b = 255;
-      break;
-    case 1: // Red - SD files 1-6
-      *r = 255; *g = 0; *b = 0;
-      break;
-    case 2: // Green - SD files 7-12
-      *r = 0; *g = 255; *b = 0;
-      break;
-    case 3: // Blue - SD files 13-18
-      *r = 0; *g = 0; *b = 255;
-      break;
-    case 4: // Yellow - Serial mode (reserved for future)
-      *r = 255; *g = 255; *b = 0;
-      break;
-    default:
-      *r = 0; *g = 0; *b = 0; // Black for unknown mode
-      break;
+// Get color for pattern mode (RGB values 0-255)
+void getPatternModeColor(uint8_t mode, uint8_t* r, uint8_t* g, uint8_t* b) {
+  if (mode < (sizeof(patternModeColors) / sizeof(patternModeColors[0]))) {
+    *r = patternModeColors[mode][0];
+    *g = patternModeColors[mode][1];
+    *b = patternModeColors[mode][2];
+  } else {
+    *r = 0; *g = 0; *b = 0; // Black for unknown mode
   }
 }
 
-// Update pen mode display LED
-void updatePenModeDisplay() {
+// Update pattern mode display LED
+void updatePatternModeDisplay() {
   uint8_t r, g, b;
-  getPenModeColor(penMode, &r, &g, &b);
+  getPatternModeColor(patternMode, &r, &g, &b);
   pixels.setPixelColor(9, pixels.Color(r, g, b));
   pixels.show();
 }
@@ -543,7 +647,7 @@ void convertThetaRhoToRadialAngular(float theta, float radius, uint16_t* radial,
   
   // Adjust for theta being measured from Y-axis instead of X-axis
   // Rotate and mirror: 270 - angleDeg
-  angleDeg = 270.0 - angleDeg;
+  angleDeg = 90.0 - angleDeg;
   
   // Normalize to 0-360 range
   while (angleDeg < 0) angleDeg += 360;
@@ -569,95 +673,23 @@ void showFileError() {
   }
 }
 
-// Initialize file system based on pen mode
-bool initializeFileSystem() {
-  if (penMode == WHITE_MODE) {
-    fileMode = false;
-    return true;
-  } else {
-    // Initialize SD card only once when first needed for SD modes
-    if (!sdCardInitialized) {
-      if (!SD.begin(SD_CS_PIN)) {
-        Serial.println("SD Card initialization failed!");
-        // Show error light - flash red on LED 0
-        showErrorLED(0, 255, 0, 0, 500.0);
-        UI.selectMode = true;
-        return false;
-      } else {
-        sdCardInitialized = true;
-        Serial.println("SD Card initialized successfully");
-      }
-    }
-    
-    // Calculate file number with offset
-    uint8_t actualFileNumber = UI.cursorPos + 1 + (penMode - 1) * 6;    
-    // Also try with character array
-    char filenameChar[10];
-    sprintf(filenameChar, "%d.thr", actualFileNumber);
-    Serial.print("Trying char array: ");
-    Serial.println(filenameChar);
-    
-    thrFile = SD.open(filenameChar, FILE_READ);
-    
-    if (!thrFile) {
-      Serial.print("Failed to open: ");
-      Serial.println(filenameChar);
-      // Show error light - flash red on LED 1
-      showFileError();
-      // Return to selector screen
-      UI.selectMode = true;
-      return false; // Indicate failure
-    } else {
-      fileMode = true;
-      Serial.print("Opened file: ");
-      Serial.println(filenameChar);
-      return true; // Indicate success
-    }
-  }
-}
 
 // Read next coordinate from file or PROGMEM
 bool readNextCoordinate(Positions* coord) {
-  if (!fileMode) {
+#if EnableSDCard
+  if (patternMode == EMBEDDED) {
     // Use existing PROGMEM pattern reading
     return readNextPatternCoordinate(coord);
   } else {
     // Read from .thr file
     return readNextThrCoordinate(coord);
   }
+#else
+  // SD card disabled - always use PROGMEM
+  return readNextPatternCoordinate(coord);
+#endif
 }
 
-// Read next coordinate from .thr file
-bool readNextThrCoordinate(Positions* coord) {
-  if (!thrFile || !thrFile.available()) {
-    Serial.println("End of file or file not available");
-    return false; // End of file
-  }
-  
-  String line = thrFile.readStringUntil('\n');
-  line.trim(); // Remove whitespace
-  
-  if (line.length() == 0) {
-    return false; // Empty line
-  }
-  
-  // Parse "theta radius" format
-  int spaceIndex = line.indexOf(' ');
-  if (spaceIndex > 0) {
-    float theta = line.substring(0, spaceIndex).toFloat();
-    float radius = line.substring(spaceIndex + 1).toFloat();
-    
-    // Convert to existing format
-    convertThetaRhoToRadialAngular(theta, radius, &coord->radial, &coord->angular);
-    
-    // Increment point index for file reading
-    Plotter.pointIndex++;
-    
-    return true;
-  }
-  
-  return false;
-}
 
 // Read next coordinate from PROGMEM pattern
 bool readNextPatternCoordinate(Positions* coord) {
@@ -681,7 +713,7 @@ void setup() {
   pinMode(CURSORPIN, INPUT_PULLUP);
 
   Serial.begin(115200);
-  Serial.println("PLTTR V1.0.0 ..... 7/22/2025");
+  Serial.println("PLTTR-StringSketcher V1.0.1 ..... 10/07/2025");
   Wire.begin();
   pixels.begin();
 
@@ -720,7 +752,6 @@ void setup() {
 
   // Initialize pattern drawing
   initializePatternDrawing();
-  Serial.println("Pattern drawing initialized");
   
   for(uint8_t i = 2 ; i < 2 + UI.cursorPos; i++){
     pixels.setPixelColor(i, pixels.Color(5, 1, 5));
@@ -836,10 +867,13 @@ void pause(){
 
 // homes the plotter bot, then goes back to file selection
 void restart(bool move){
+
+#if EnableSDCard
   // Close .thr file if open
   if (thrFile) {
     thrFile.close();
   }
+#endif
 
   // Lift pen before moving to home
   liftPen();
@@ -928,7 +962,6 @@ void runPatternPlotter() {
 
     bool cont = false;
     while (!cont) {
-      
       // Read next coordinate (from file or PROGMEM)
       if (!readNextCoordinate(&currentPoint)) {
         // No more coordinates - pattern complete
