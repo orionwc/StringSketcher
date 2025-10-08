@@ -108,7 +108,7 @@ Updated 10/06/2025
 // Set this to true or false to enable or disable SD card functionality
 // Note that several images can be included in the .ino file directly as patterns if this is disabled
 // If you include multiple patterns and enable this, it's likely the sketch will exceed the Arduino memory limit
-#define EnableSDCard true        // [true/false] Enable SD card functionality (disable to  large embedded patterns)
+#define EnableSDCard false      // [true/false] Enable SD card functionality (disable to  large embedded patterns)
 
 #if EnableSDCard
 #include <SPI.h>                // SD
