@@ -164,7 +164,7 @@ const Positions pattern1[] PROGMEM = { // TEST PATTERN
   {800, 900},  // Point 2: Up     (90°) 
   {800, 1800}, // Point 3: Left   (180°)
   {800, 2700}, // Point 4: Down   (270°)
-  {800, 0}    // Point 5: Return to start (0°)
+  {800, 0}     // Point 5: Return to start (0°)
 };
 
 const Positions pattern2[] PROGMEM = {
