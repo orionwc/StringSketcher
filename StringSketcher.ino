@@ -118,7 +118,8 @@ Updated 10/06/2025
 // Set this to true or false to enable or disable serial streaming functionality
 // When enabled, allows receiving drawing coordinates via serial port in STREAMING mode
 // Protocol: <COORDS> -> <START> -> <READY> -> <POS:r,theta> -> <DONE> -> ... -> <END>
-#define ENABLE_STREAMING false  // [true/false] Enable serial streaming mode (requires ENABLE_SD_CARD to be true)
+#define ENABLE_STREAMING false  // [true/false] Enable serial streaming mode
+
 
 #if ENABLE_SD_CARD
 #include <SPI.h>                // SD
@@ -1645,22 +1646,3 @@ Positions readPatternPoint(uint8_t patternIndex, uint16_t pointIndex) {
 }
 
 #pragma endregion COORDINATE_MAPPING
-
-//////////////////////////////////////////////////
-//  FUTURE IMPROVEMENTS //
-//////////////////////////////////////////////////
-/*
- * Future improvements that could be added to enhance the StringSketcher:
- * 
- * 1. Line Interpolation:
- *    - Implement drawLine() function similar to Voice2Sand.ino
- *    - Interpolate between pattern coordinates for smoother movement
- *    - Reduce jerkiness in all drawing modes (embedded, SD card, and streaming)
- *    - Improve drawing quality by adding intermediate points between coordinates
- * 
- * 2. Enhanced Serial Error Handling:
- *    - Add retry mechanisms for failed serial connections
- *    - Implement connection quality monitoring
- *    - Add automatic reconnection for dropped connections
- * 
- */
