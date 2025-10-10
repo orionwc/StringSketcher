@@ -118,7 +118,7 @@ Updated 10/06/2025
 // Set this to true or false to enable or disable serial streaming functionality
 // When enabled, allows receiving drawing coordinates via serial port in STREAMING mode
 // Protocol: <COORDS> -> <START> -> <READY> -> <POS:r,theta> -> <DONE> -> ... -> <END>
-#define ENABLE_STREAMING true  // [true/false] Enable serial streaming mode (requires ENABLE_SD_CARD to be true)
+#define ENABLE_STREAMING false  // [true/false] Enable serial streaming mode (requires ENABLE_SD_CARD to be true)
 
 #if ENABLE_SD_CARD
 #include <SPI.h>                // SD
@@ -129,8 +129,7 @@ Updated 10/06/2025
 const bool MoveDownOnCompletion = true;  // [true/false] Move below image after pattern completes
 
 
-#if ENABLE_STREAMING
-// Serial streaming variables
+// Serial streaming variables (always declared, but only used when ENABLE_STREAMING is true)
 const byte numCharsSerialBuffer = 32;
 char receivedString[numCharsSerialBuffer];
 bool streamingInitialized = false;
@@ -138,7 +137,6 @@ bool waitingForStart = false;
 bool streamingActive = false;
 unsigned long lastSerialTime = 0;
 const unsigned long SERIAL_TIMEOUT = 30000; // 30 second timeout
-#endif
 
 // Pen LED color cycling for active drawing feedback
 uint8_t penColorCycleIndex = 0;
@@ -622,6 +620,12 @@ bool checkStreamingTimeout() {
     return false; // No timeout
 }
 
+#else
+// Stub functions when streaming is disabled (only those called outside #if ENABLE_STREAMING blocks)
+
+bool checkStreamingTimeout() {
+    return false;
+}
 #endif
 
 
@@ -987,7 +991,12 @@ void setup() {
   pinMode(PAUSEPIN, INPUT_PULLUP);
   pinMode(CURSORPIN, INPUT_PULLUP);
 
+  #if ENABLE_STREAMING
   Serial.begin(9600);
+  #else
+  Serial.begin(115200);
+  #endif
+
   Serial.println("PLTTR-StringSketcher V1.0.1 ..... 10/07/2025");
   Wire.begin();
   pixels.begin();
@@ -1086,9 +1095,10 @@ void loop() {
   
   // Handle streaming initialization and waiting for START
   if (patternMode == STREAMING && waitingForStart && !UI.selectMode) {
+#if ENABLE_STREAMING
     // Check for START response
     checkForStartResponse();
-    
+#endif    
     // Show pulsing yellow LEDs while waiting for START
     showPulsingYellowLEDs();
   }
