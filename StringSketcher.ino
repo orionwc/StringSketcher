@@ -80,6 +80,11 @@ Updated 10/06/2025
 #define R_M_PWM 5
 
 #define NUM_PATTERNS 6          // Number of patterns selectable in one Pattern Mode
+#define PATTERN_SELECTOR_LED 9   // LED index for pattern mode selection (pen icon)
+
+// Pattern completion position (radial, angular*10)
+#define REVEAL_POSITION_RADIAL 1100
+#define REVEAL_POSITION_ANGULAR 2700
 
 // Image Size presets ---------------------------------------------------------
 #define SMALL_WIDTH 500
@@ -108,15 +113,44 @@ Updated 10/06/2025
 // Set this to true or false to enable or disable SD card functionality
 // Note that several images can be included in the .ino file directly as patterns if this is disabled
 // If you include multiple patterns and enable this, it's likely the sketch will exceed the Arduino memory limit
-#define EnableSDCard false      // [true/false] Enable SD card functionality (disable to  large embedded patterns)
+#define ENABLE_SD_CARD false    // [true/false] Enable SD card functionality (disable to  large embedded patterns)
 
-#if EnableSDCard
+// Set this to true or false to enable or disable serial streaming functionality
+// When enabled, allows receiving drawing coordinates via serial port in STREAMING mode
+// Protocol: <COORDS> -> <START> -> <READY> -> <POS:r,theta> -> <DONE> -> ... -> <END>
+#define ENABLE_STREAMING false  // [true/false] Enable serial streaming mode
+
+
+#if ENABLE_SD_CARD
 #include <SPI.h>                // SD
 #include <SdFat.h>              // FAT storage type
 #endif
 
 // Pattern completion behavior ------------------------------------------------
 const bool MoveDownOnCompletion = true;  // [true/false] Move below image after pattern completes
+
+
+// Serial streaming variables (always declared, but only used when ENABLE_STREAMING is true)
+const byte numCharsSerialBuffer = 32;
+char receivedString[numCharsSerialBuffer];
+bool streamingInitialized = false;
+bool waitingForStart = false;
+bool streamingActive = false;
+unsigned long lastSerialTime = 0;
+const unsigned long SERIAL_TIMEOUT = 30000; // 30 second timeout
+
+// Pen LED color cycling for active drawing feedback
+uint8_t penColorCycleIndex = 0;
+const uint8_t PEN_COLOR_CYCLE_COUNT = 6;
+const uint32_t PEN_COLOR_CYCLE[] = {
+  0xFF0000, // Red
+  0xFF8000, // Orange  
+  0xFFFF00, // Yellow
+  0x00FF00, // Green
+  0x0000FF, // Blue
+  0x8000FF  // Purple
+};
+
 
 // Starting Pattern Mode
 uint8_t patternMode = 0;  // Current pattern mode selection (0=EMBEDDED, 1-3=SDCARD_1-3, 4=STREAMING)
@@ -133,12 +167,16 @@ const uint8_t patternModeColors[][3] = {
 // Which pattern modes are enabled based on SD card setting
 const bool patternModeEnabled[] = {
   true,             // EMBEDDED - always enabled
-#if EnableSDCard    // SDCARD_1, SDCARD_2, SDCARD_3 - enabled when SD card available
+#if ENABLE_SD_CARD    // SDCARD_1, SDCARD_2, SDCARD_3 - enabled when SD card available
   true, true, true,            
 #else
   false, false, false,         
 #endif
-  false            // STREAMING - reserved for future
+#if ENABLE_STREAMING
+  true             // STREAMING - enabled when serial streaming is enabled
+#else
+  false            // STREAMING - disabled when serial streaming is disabled
+#endif
 };
 
 // ************* END SETTINGS *************
@@ -199,7 +237,7 @@ const Positions pattern5[] PROGMEM = {
 };
 
 const Positions pattern6[] PROGMEM = {
-#if EnableSDCard
+#if ENABLE_SD_CARD
   // Empty Pattern - a large pattern is not supported when SD card is enabled as it exceeds the Arduino memory limit
   {0,0}
 #else
@@ -310,6 +348,10 @@ struct bot{
   bool PenDownOnArrival;            // pen state when arriving at next point
   Positions previousPoint;          // previous pattern point for duplicate detection
   bool patternComplete;             // true when pattern is finished, waiting for return button
+  bool drawing;                     // true when actively drawing a pattern
+  bool doneSent;                    // true when DONE message has been sent for current coordinate
+  bool patternEnded;                // true when END signal was received
+  bool WaitingForCoordinate;        // true when waiting for next coordinate to arrive
 };
 
 ///////////////////////////// INIT STRUCTS /////////////////////////////////////
@@ -324,66 +366,85 @@ encoder Encoder = {12.5, 0.0, 0.0, false, false, 0};
 pen Pen = {penUpPos, penDownPos, penStartPos, 0};
 //menu flag (starts true), is paused (starts false), green button pressed, red button pressed, selected file number (list index)
 ui UI = {true, false, false, false, initCursorPos};
-//current XY, current string lengths, next XY, next string lengths, initial string lengths, pointIndex, PenDownOnArrival, previousPoint, patternComplete
-bot Plotter = {{0}, {0}, {0}, {0}, {0}, 0, false, {0, 0}, false};
+//current XY, current string lengths, next XY, next string lengths, initial string lengths, pointIndex, PenDownOnArrival, previousPoint, patternComplete, drawing, doneSent, patternEnded, WaitingForCoordinate
+bot Plotter = {{0}, {0}, {0}, {0}, {0}, 0, false, {0, 0}, false, false, false, false, false};
 #pragma endregion STRUCTS
 
 //////////////////////////////////////////////////
 //  SD CARD FUNCTIONALITY //
 //////////////////////////////////////////////////
-#if EnableSDCard
-SdFat SD;  
-File thrFile;
+#if ENABLE_SD_CARD
+SdFat SD;                           // SD card filesystem object
+File thrFile;                       // Currently open .thr pattern file
+bool sdCardInitialized = false;     // Track if SD card has been initialized
+#endif
 
-// File reading system variables
-bool sdCardInitialized = false;
+// Initialize system based on pattern mode
+bool initializeSystem() {
+  switch (patternMode) {
+    case EMBEDDED:
+      return true;
 
-// Initialize file system based on pattern mode
-bool initializeFileSystem() {
-  if (patternMode == EMBEDDED) {
-    return true;
-  } else {
-    // Initialize SD card only once when first needed for SD modes
-    if (!sdCardInitialized) {
-      if (!SD.begin(SD_CS_PIN)) {
-        Serial.println("SD Card initialization failed!");
-        // Show error light - flash red on LED 0
-        showErrorLED(0, 255, 0, 0, 500.0);
-        UI.selectMode = true;
-        return false;
-      } else {
-        sdCardInitialized = true;
-      }
-    }
-    
-    // Calculate file number with offset
-    uint8_t actualFileNumber = UI.cursorPos + 1 + (patternMode - 1) * 6;    
-    // Also try with character array
-    char filenameChar[10];
-    sprintf(filenameChar, "%d.thr", actualFileNumber);
-    
-    // Check if SD card is available
-    if (!SD.exists(filenameChar)) {
-      Serial.print("File does not exist: ");
-      Serial.println(filenameChar);
+#if ENABLE_STREAMING
+    case STREAMING:
+      return initializeSerialStreaming();
+#endif
+
+#if ENABLE_SD_CARD
+    case SDCARD_1:
+    case SDCARD_2:
+    case SDCARD_3:
+      return initializeSDCard();
+#endif
+
+    default:
       return false;
-    }
-    
-    thrFile = SD.open(filenameChar, FILE_READ);
-    
-    if (!thrFile) {
-      Serial.print("Failed to open: ");
-      Serial.println(filenameChar);
-      // Show error light - flash red on LED 1
-      showFileError();
-      // Return to selector screen
+  }
+}
+
+#if ENABLE_SD_CARD
+// Initialize SD card and open pattern file
+bool initializeSDCard() {
+  // Initialize SD card only once when first needed for SD modes
+  if (!sdCardInitialized) {
+    if (!SD.begin(SD_CS_PIN)) {
+      Serial.println("SD Card initialization failed!");
+      // Show error light - flash red on LED 0
+      showErrorLED(0, 255, 0, 0, 500.0);
       UI.selectMode = true;
-      return false; // Indicate failure
+      return false;
     } else {
-      Serial.print("Opened file: ");
-      Serial.println(filenameChar);
-      return true; // Indicate success
+      sdCardInitialized = true;
     }
+  }
+  
+  // Calculate file number with offset
+  uint8_t actualFileNumber = UI.cursorPos + 1 + (patternMode - 1) * 6;    
+  // Also try with character array
+  char filenameChar[10];
+  sprintf(filenameChar, "%d.thr", actualFileNumber);
+  
+  // Check if SD card is available
+  if (!SD.exists(filenameChar)) {
+    Serial.print("File does not exist: ");
+    Serial.println(filenameChar);
+    return false;
+  }
+  
+  thrFile = SD.open(filenameChar, FILE_READ);
+  
+  if (!thrFile) {
+    Serial.print("Failed to open: ");
+    Serial.println(filenameChar);
+    // Show error light - flash red on LED 1
+    showFileError();
+    // Return to selector screen
+    UI.selectMode = true;
+    return false; // Indicate failure
+  } else {
+    Serial.print("Opened file: ");
+    Serial.println(filenameChar);
+    return true; // Indicate success
   }
 }
 
@@ -423,6 +484,153 @@ bool readNextThrCoordinate(Positions* coord) {
 #endif
 
 //////////////////////////////////////////////////
+//  SERIAL STREAMING FUNCTIONALITY //
+//////////////////////////////////////////////////
+#if ENABLE_STREAMING
+
+// Parse serial input with start and end markers
+char* receivedWithStartEndMarkers() {
+    static boolean recvInProgress = false;
+    static bool newData = false;
+    static byte ndx = 0;
+
+    char startMarker = '<';
+    char endMarker = '>';
+    char rc;
+    newData = false;
+    
+    while (Serial.available() > 0 && newData == false) {
+        rc = Serial.read();
+        if (recvInProgress == true) {
+            if (rc != endMarker) {
+                receivedString[ndx] = rc;
+                ndx++;
+                if (ndx >= numCharsSerialBuffer) {
+                    ndx = numCharsSerialBuffer - 1;
+                }
+            } else {
+                receivedString[ndx] = '\0'; // terminate the string
+                recvInProgress = false;
+                ndx = 0;
+                newData = true;
+            }
+        } else if (rc == startMarker) {
+            recvInProgress = true;
+        }
+    }
+    
+    if (newData) {
+        lastSerialTime = millis(); // Update last serial activity time
+        return receivedString;
+    } else {
+        return nullptr;
+    }
+}
+
+// Wait for specific serial response
+void waitUntilReceived(String s) {
+    while (s.compareTo(String(receivedString)) != 0) {
+        char* receivedString = receivedWithStartEndMarkers();
+        if (receivedString == nullptr) {
+            delay(10); // Small delay to prevent busy waiting
+        }
+    }
+}
+
+// Initialize serial streaming handshake
+bool initializeSerialStreaming() {
+    if (streamingInitialized) {
+        return true;
+    }
+    
+    Serial.println("COORDS");
+    waitingForStart = true;
+    streamingInitialized = true;
+    lastSerialTime = millis();
+    
+    return true; // Initialization started successfully, waiting handled in main loop
+}
+
+bool checkForStartResponse() {
+    if (!waitingForStart) {
+        return false;
+    }
+    
+    char* received = receivedWithStartEndMarkers();
+    if (received != nullptr && String(received).compareTo("START") == 0) {
+        Serial.println("READY");
+        waitingForStart = false;
+        streamingActive = true;
+        return true;
+    }
+    
+    return false;
+}
+
+// Read next coordinate from serial stream
+bool readNextStreamingCoordinate(Positions* coord) {
+    if (!streamingActive) {
+        return false;
+    }
+    
+    char* received = receivedWithStartEndMarkers();
+    if (received != nullptr) {
+        // Check for explicit end signal
+        if (strncmp(received, "END", 3) == 0) {
+            Serial.println("END_RECEIVED");
+            Plotter.patternEnded = true;
+            return false; // Signal pattern completion
+        }
+        // Check if receivedString contains "POS:"
+        else if (strncmp(received, "POS:", 4) == 0) {
+            int r = 0, theta = 0;
+            if (sscanf(received + 4, "%d,%d", &r, &theta) == 2) {
+                // Echo back the coordinate message (confirmation of receipt)
+                Serial.println(received);
+                
+                // Increment point index for streaming
+                Plotter.pointIndex++;
+                
+                // Reset doneSent flag for new coordinate
+                Plotter.doneSent = false;
+                
+                coord->radial = (uint16_t)r;
+                coord->angular = (uint16_t)theta;
+                return true;
+            }
+        }
+    }
+    
+    return false;
+}
+
+// Check for streaming timeout (only when robot is waiting for next coordinate)
+bool checkStreamingTimeout() {
+    if (!streamingActive) {
+        return false;
+    }
+    
+    // Only check timeout when robot is waiting for next coordinate
+    // (i.e., when we're actively trying to read the next coordinate)
+    if (millis() - lastSerialTime > SERIAL_TIMEOUT) {
+        Serial.println("STREAMING_TIMEOUT");
+        streamingActive = false;
+        return true; // Timeout occurred
+    }
+    
+    return false; // No timeout
+}
+
+#else
+// Stub functions when streaming is disabled (only those called outside #if ENABLE_STREAMING blocks)
+
+bool checkStreamingTimeout() {
+    return false;
+}
+#endif
+
+
+//////////////////////////////////////////////////
 //  SETUP //
 //////////////////////////////////////////////////
 #pragma region SETUP_FUNCTIONS
@@ -450,7 +658,13 @@ void runUI(){
     }
     if(redButton.isReleased() && UI.sWasPressed){
       UI.sWasPressed = false;
-      UI.cursorPos += 1;               // cycle thru menu
+      
+      // Special handling for STREAMING mode - skip from position 0 to size selector
+      if (patternMode == STREAMING && UI.cursorPos == 0) {
+        UI.cursorPos = NUM_PATTERNS;  // Skip directly to size selector
+      } else {
+        UI.cursorPos += 1;               // cycle thru menu
+      }
       UI.cursorPos %= NUM_PATTERNS + 2;    // wrap back after the draw settings
     }
 
@@ -497,24 +711,24 @@ void runUI(){
       else {
         UI.pWasPressed = false;     // ensure not paused
         
-#if EnableSDCard
-        // Try to initialize file system for selected file
-        if (!initializeFileSystem()) {
-          // File initialization failed, stay in selector mode
-          Serial.println("File not found, staying in selector");
+        // Try to initialize system for selected file
+        if (!initializeSystem()) {
+          // System initialization failed, stay in selector mode
+          Serial.println("Initialization failed, staying in selector");
           return; // Stay in UI loop
         }
-#endif
         
         UI.selectMode = false;      // Exit UI loop with this flag
 
         for(uint8_t i = 0; i < 3; i++){         // flash selected pixel green
           pixels.clear();
           pixels.show();
+          
           pixels.setPixelColor(UI.cursorPos + 2, pixels.Color(0, 255, 0));
           pixels.show();
           delay(300);
-          pixels.setPixelColor(UI.cursorPos + 2, pixels.Color(0, 0, 0));
+          
+          pixels.clear();
           pixels.show();
           delay(300);
         }
@@ -523,17 +737,18 @@ void runUI(){
     }
 
     // Blink cursor LED with pattern mode color if over file/pattern
-    if(UI.cursorPos < 6){
+    if(UI.cursorPos < NUM_PATTERNS){
       pixels.clear();
       
       // Get pattern mode color and apply brightness scaling
       uint8_t r, g, b;
       getPatternModeColor(patternMode, &r, &g, &b);
+      
       setLEDWithSineWave(UI.cursorPos + 2, r, g, b, 300.0);
       pixels.show();
     } 
     // change cursor LED's color to select sizes
-    else if (UI.cursorPos == 6){
+    else if (UI.cursorPos == NUM_PATTERNS){
       int col = 255;
       pixels.clear();
       switch(Image.setSize){
@@ -673,21 +888,86 @@ void showFileError() {
   }
 }
 
+// Cycle pen LED color for active drawing feedback
+void cyclePenLEDColor() {
+  if (Plotter.drawing && !UI.paused) {
+    uint32_t color = PEN_COLOR_CYCLE[penColorCycleIndex];
+    pixels.setPixelColor(PATTERN_SELECTOR_LED, color);
+    pixels.show();
+    penColorCycleIndex = (penColorCycleIndex + 1) % PEN_COLOR_CYCLE_COUNT;
+  }
+}
+
+// Reset pen LED to normal state (off)
+void resetPenLEDColor() {
+  pixels.setPixelColor(PATTERN_SELECTOR_LED, pixels.Color(0, 0, 0)); // Off
+  pixels.show();
+}
+
+// Show pulsing yellow LEDs on pattern LEDs 2-7
+void showPulsingYellowLEDs() {
+  int brightness = 255 * (0.1 + 0.9 * (0.5 + 0.5 * sin(millis() / 200.0)));
+  for (uint8_t i = 2; i <= NUM_PATTERNS + 1; i++) {
+    pixels.setPixelColor(i, pixels.Color(brightness, brightness, 0));
+  }
+  pixels.show();
+}
+
+
+
+// Handle pattern completion - lift pen and move to reveal position if enabled
+void handlePatternCompletion() {
+  // Lift pen when pattern finishes
+  liftPen();
+  
+  // Move down if enabled, otherwise stop motors
+  if (MoveDownOnCompletion) {
+    setTargetFromPolar(REVEAL_POSITION_RADIAL, REVEAL_POSITION_ANGULAR);
+    Serial.println("Moving down to completion position...");
+  } else {
+    // Stop motors only if not moving to completion position
+    stopMotors();
+  }
+  
+  Plotter.patternComplete = true;
+  Plotter.drawing = false;  // Set drawing flag to false
+  
+#if ENABLE_STREAMING
+  // Reset streaming state when pattern completes
+  if (patternMode == STREAMING) {
+    streamingActive = false;
+    streamingInitialized = false;
+    waitingForStart = false;
+    lastSerialTime = 0;
+  }
+#endif
+}
+
 
 // Read next coordinate from file or PROGMEM
 bool readNextCoordinate(Positions* coord) {
-#if EnableSDCard
-  if (patternMode == EMBEDDED) {
-    // Use existing PROGMEM pattern reading
-    return readNextPatternCoordinate(coord);
-  } else {
-    // Read from .thr file
-    return readNextThrCoordinate(coord);
-  }
-#else
-  // SD card disabled - always use PROGMEM
-  return readNextPatternCoordinate(coord);
+  switch (patternMode) {
+    case EMBEDDED:
+      // Use existing PROGMEM pattern reading
+      return readNextPatternCoordinate(coord);
+
+#if ENABLE_STREAMING
+    case STREAMING:
+      // Read from serial stream
+      return readNextStreamingCoordinate(coord);
 #endif
+
+#if ENABLE_SD_CARD
+    case SDCARD_1:
+    case SDCARD_2:
+    case SDCARD_3:
+      // Read from .thr file
+      return readNextThrCoordinate(coord);
+#endif
+
+    default:
+      return false;
+  }
 }
 
 
@@ -712,7 +992,12 @@ void setup() {
   pinMode(PAUSEPIN, INPUT_PULLUP);
   pinMode(CURSORPIN, INPUT_PULLUP);
 
+  #if ENABLE_STREAMING
+  Serial.begin(9600);
+  #else
   Serial.begin(115200);
+  #endif
+
   Serial.println("PLTTR-StringSketcher V1.0.1 ..... 10/07/2025");
   Wire.begin();
   pixels.begin();
@@ -809,6 +1094,16 @@ void loop() {
     runPatternPlotter();
   }
   
+  // Handle streaming initialization and waiting for START
+  if (patternMode == STREAMING && waitingForStart && !UI.selectMode) {
+#if ENABLE_STREAMING
+    // Check for START response
+    checkForStartResponse();
+#endif    
+    // Show pulsing yellow LEDs while waiting for START
+    showPulsingYellowLEDs();
+  }
+  
 }
 #pragma endregion LOOP
 
@@ -827,6 +1122,16 @@ void pollButtons(){
   }
   if(redButton.isReleased() && UI.sWasPressed){
     UI.sWasPressed = false;
+    
+    // If in streaming mode and waiting for START, cancel listening
+    if (patternMode == STREAMING && waitingForStart) {
+      Serial.println("STREAMING_CANCELLED");
+      streamingInitialized = false;
+      waitingForStart = false;
+      streamingActive = false;
+      UI.selectMode = true;
+    }
+    
     // Always use restart() for consistent behavior
     restart(true);
     return;
@@ -844,6 +1149,7 @@ void pollButtons(){
     else{
       myPen.attach(SERVOPIN);                // if resume, light selected file
       pixels.clear();
+      
       pixels.setPixelColor(UI.cursorPos + 2, pixels.Color(100, 0, 100));
       pixels.show();
     }
@@ -868,7 +1174,7 @@ void pause(){
 // homes the plotter bot, then goes back to file selection
 void restart(bool move){
 
-#if EnableSDCard
+#if ENABLE_SD_CARD
   // Close .thr file if open
   if (thrFile) {
     thrFile.close();
@@ -884,6 +1190,8 @@ void restart(bool move){
 
   UI.selectMode = true;
   UI.paused = false;
+  Plotter.drawing = false;  // Reset drawing flag
+  Plotter.WaitingForCoordinate = false;  // Reset waiting flag
 
   // Set target to initialized string lengths (true home position)
   Plotter.nextLengths[0] = Plotter.initStringLengths[0];  // left string length
@@ -935,6 +1243,9 @@ void initializePatternDrawing() {
   Plotter.pointIndex = -1;  // Use -1 to indicate "not started"
   Plotter.previousPoint = {0, 0};
   Plotter.patternComplete = false;  // Reset pattern complete flag
+  Plotter.drawing = true;  // Set drawing flag to true
+  Plotter.patternEnded = false;  // Reset pattern ended flag
+  Plotter.WaitingForCoordinate = false;  // Reset waiting flag
 }
 
 // Run pattern plotter - draws one pattern point per call
@@ -951,10 +1262,16 @@ void runPatternPlotter() {
     if (Plotter.pointIndex < 0) {
       // Just initialized - load first coordinate.
       Plotter.PenDownOnArrival = true;
-    } else if (Plotter.PenDownOnArrival) {
+    } else if (Plotter.PenDownOnArrival && !Plotter.WaitingForCoordinate) {
       Pen.penPos = Pen.penDown;
       myPen.write(Pen.penPos);
       Plotter.PenDownOnArrival = false;
+    }
+    
+    // Target reached - send DONE for streaming mode (only once per coordinate)
+    if (patternMode == STREAMING && !Plotter.doneSent) {
+      Serial.println("DONE");
+      Plotter.doneSent = true;
     }
 
     // Declare currentPoint
@@ -962,33 +1279,56 @@ void runPatternPlotter() {
 
     bool cont = false;
     while (!cont) {
-      // Read next coordinate (from file or PROGMEM)
-      if (!readNextCoordinate(&currentPoint)) {
-        // No more coordinates - pattern complete
-        Serial.println("Pattern complete - Press red button to return to start");
+#if ENABLE_STREAMING
+      // Check for streaming timeout before reading next coordinate
+      if (patternMode == STREAMING && checkStreamingTimeout()) {
+        // Timeout occurred - pattern complete
+        Serial.println("Streaming timeout - Press red button to return to start");
         
-        // Lift pen when pattern finishes
-        liftPen();
-        
-        // Move down if enabled, otherwise stop motors
-        if (MoveDownOnCompletion) {
-          setTargetFromPolar(1100, 2700);
-          Serial.println("Moving down to completion position...");
-        } else {
-          // Stop motors only if not moving to completion position
-          stopMotors();
-        }
-        
-        Plotter.patternComplete = true;
+        // Handle pattern completion for streaming timeout
+        handlePatternCompletion();
         return;
       }
+#endif
       
+      // Read next coordinate (from file or PROGMEM)
+      if (!readNextCoordinate(&currentPoint)) {
+        // No coordinate available yet - check if we should wait or timeout
+        if (patternMode == STREAMING) {
+          // Check if pattern ended with END signal
+          if (Plotter.patternEnded) {
+            handlePatternCompletion();
+            return;
+          }
+          // For streaming mode, check timeout before ending pattern
+          if (checkStreamingTimeout()) {
+            Serial.println("Streaming timeout - Press red button to return to start");
+            handlePatternCompletion();
+            return;
+          }
+          // No timeout yet - keep waiting for next coordinate
+          Plotter.WaitingForCoordinate = true;
+          return;
+        } else {
+          // For other modes, no more coordinates - pattern complete
+          Serial.println("Pattern complete - Press red button to return to start");
+          handlePatternCompletion();
+          return;
+        }
+      }
+      
+      Plotter.WaitingForCoordinate = false;
       cont = true;
 
       // Check for duplicate coordinates (pen up signal)
       if (Plotter.pointIndex > 0 && currentPoint.radial == Plotter.previousPoint.radial && 
         currentPoint.angular == Plotter.previousPoint.angular) {
         cont = false;
+
+        if (patternMode == STREAMING && !Plotter.doneSent) {
+          Serial.println("DONE");
+          Plotter.doneSent = true;
+        }
 
         // Lift pen
         liftPen();
@@ -1002,13 +1342,14 @@ void runPatternPlotter() {
     setTargetFromPolar(currentPoint.radial, currentPoint.angular);
     
     // Debug output
+    /*
     Serial.print("Point ");
     Serial.print(Plotter.pointIndex);
     Serial.print(": ");
     Serial.print(currentPoint.radial);
     Serial.print(" ");
     Serial.println(currentPoint.angular);
-
+    */
   }
   
 }
@@ -1098,21 +1439,10 @@ void setTargetFromPolar(uint16_t radial, uint16_t angular) {
   XYToLengths(nextXY[0], nextXY[1], nextL);
   Plotter.nextLengths[0] = nextL[0];
   Plotter.nextLengths[1] = nextL[1];
-}
-
-// Set target position from cartesian coordinates
-void setTargetFromXY(float x, float y) {
-  // Set target coordinates
-  Plotter.nextCoords[0] = x;
-  Plotter.nextCoords[1] = y;
   
-  // Convert to string lengths
-  float nextL[2];
-  XYToLengths(x, y, nextL);
-  Plotter.nextLengths[0] = nextL[0];
-  Plotter.nextLengths[1] = nextL[1];
+  // Cycle pen LED color for active drawing feedback
+  cyclePenLEDColor();
 }
-
 
 /////////////////////// Movement Control Functions //////////////////////////
 // Gives speeds to move each motor towards it's target position. Once within  Linearly scales speed relative to distance-to-go with a lower bound at the minimum duty cycle required to lift the robot.
