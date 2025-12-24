@@ -29,7 +29,7 @@ uint8_t penHold = 35;          // [0 - 100] how long pendown persits after a dot
 uint8_t sampleTime = 5;         // [5 - 200] how often (ms) encoders are updated
 
 uint8_t drawSpeed = 150;        // [0 - 255]
-uint8_t motorTravelSpeed = 190  // [0 - 255]
+uint8_t motorTravelSpeed = 190;  // [0 - 255]
 uint8_t motorCoastDist = 8;     // [0 - 5] within dist mm we reduce motor speed
 float epsilonScaling = 0.4;     // [0.1 - 0.9] scale motor speed near target
 
